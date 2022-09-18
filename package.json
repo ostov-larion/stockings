@@ -1,0 +1,17 @@
+{
+  "name": "stockings",
+  "version": "1.0.0",
+  "description": "Stockings protocol client",
+  "main": "stockings.js",
+  "bin": "stockings.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "websokets",
+    "rtc",
+    "broadcasting"
+  ],
+  "author": "Ostov Larion",
+  "license": "MIT"
+}

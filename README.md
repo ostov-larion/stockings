@@ -1,2 +1,2 @@
 # stockings
-Stockings server
+Stockings daemon.

@@ -1,164 +1,122 @@
 #! /usr/bin/env node
 
 let args = require('args')
-let { client: ws } = require('websocket')
+let ws = require('ws').WebSocket
 let fs = require('fs')
-let path = require('path')
 let crypto = require('crypto')
-const EventEmitter = require('events');
+let { exec } = require('child_process')
 
-let broker = 'wss://stockings-server.herokuapp.com'
+args.option('broker', 'Use custom broker', 'wss://stockings-server.herokuapp.com')
+args.option('id', 'Use identity', 'id')
 
-let client = new ws()
-
-client.on('connectFailed', err => console.error(err))
-
-args.option('meta','Filter stream by metadata.', '', m => 
-    m.split(' ').reduce((state, kv) => ({...state, [kv.split('=')[0]]: kv.split('=')[1]}), {})
-)
-
-args.command('scan', 'Scan files.', (_, [dir], opts) => {
-    let files = fs.readdirSync(dir,{encoding: 'utf8', withFileTypes: true}).filter(dirent => dirent.isFile())
-    for(let file of files) {
-        let name = file.name
-        let ext = path.extname(file.name)
-        let meta = {
-            name: opts.meta.name || name,
-            ext: opts.meta.ext || ext
-        }
-        if(name == meta.name && ext == meta.ext) {
-            let data = fs.readFileSync(path.join(dir, file.name), {encoding: 'base64url'})
-            let hash = crypto.createHash('md5').update(data).digest('hex')
-            let container = `data://name=${name};ext=${ext};hash=${hash}::${data}`
-            console.log(container)
-        }
-    }
-})
-
-args.command('cat', 'Read file.', (_, [file], opts) => {
-        let name = file
-        let ext = path.extname(file)
-        let meta = {
-            name: opts.meta.name || name,
-            ext: opts.meta.ext || ext
-        }
-        if(name == meta.name && ext == meta.ext) {
-            let data = fs.readFileSync(file, {encoding: 'base64url'})
-            let hash = crypto.createHash('md5').update(data).digest('hex')
-            let container = `data://name=${name};ext=${ext};hash=${hash}::${data}`
-            console.log(container)
-        }
-})
-
-function STDIN() {
-  const stdin = new EventEmitter();
-  let buff = '';
-
-  process.stdin
-    .on('data', data => {
-      buff += data;
-      lines = buff.split(/\r\n|\n/);
-      buff = lines.pop();
-      lines.forEach(line => stdin.emit('line', line));
+args.command('run','Run daemon.', (_, __, opts) => {
+  client = new ws(opts.broker)
+  client.on('open', () => {
+    console.log(`Connection successed.`)
+    client.on('error', () => console.error('Connection closed (ERROR).'))
+    client.on('close', () => console.log('Connection closed.'))
+    client.on('message', msg => {
+      let [name, pubkey, sign, base64] = msg.toString('utf8').split('\n@@@\n')
+      console.log(`New archive: ${name}.`)
+      if(crypto.verify('RSA-SHA256', Buffer.from(base64, 'base64'), pubkey, Buffer.from(sign, 'hex'))) {
+        decompress(pubkey, name, sign, base64, false)
+        console.log('Decompressed')
+      }
+      else {
+        console.error('ERROR: Bad signature.')
+      }
     })
-    .on('end', () => {
-      if (buff.length > 0) stdin.emit('line', buff);
-    });
+    publishArchives(client)
+  })
+  setInterval(() => client.send('ping'), 8000)
+})
 
-  return stdin;
-}
-/**
- * parseContainer
- * @param {String} c 
- */
-let parseContainer = c => {
-    if(!c.match(/data:\/\/(.+?)::(.+)/)) return false
-    let [_, _m, data] = c.match(/data:\/\/(.+?)::(.+)/)
-    let meta = _m.split(';').reduce((state, kv) => ({...state, [kv.split('=')[0]]: kv.split('=')[1]}), {})
-    return {meta, data}
+args.command('add', 'Add directory to repo.', (_, [dir], opts) => addArchive(dir, opts.id))
+
+let init = () => {
+  if(!fs.existsSync('./temp')) {
+    fs.mkdirSync('./temp')
+  }
+  if(!fs.existsSync('./archives')) {
+    fs.mkdirSync('./archives')
+  }
+  if(!fs.existsSync('./ids')) {
+    fs.mkdirSync('./ids')
+    console.log('Generation default key pair...')
+    let passphrase = Math.floor(Math.random() * 1000000).toString(16)
+    let {publicKey, privateKey} = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 4096,
+      publicKeyEncoding: {
+        type: 'spki',
+        format: 'pem'
+      },
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem',
+        cipher: 'aes-256-cbc',
+        passphrase
+      }
+    })
+    fs.writeFileSync('./ids/id.rsa', privateKey, {encoding: 'utf8'})
+    fs.writeFileSync('./ids/id.pub', publicKey, {encoding: 'utf8'})
+    fs.writeFileSync('./ids/id.pass', passphrase, {encoding: 'utf8'})
+  }
 }
 
-args.command('loc', 'Locate files.', (_, [metakey, dir], opts) => {
-    let save = (c) => {
-        fs.writeFileSync(path.join(dir, c.meta[metakey] + c.meta.ext), Buffer.from(c.data, 'base64url'))
-        console.log('File saved:', c.meta[metakey] + c.meta.ext)
+init()
+
+let decompress = (pubkey, name, sign, base64, local) => {
+    if(!local) {
+      fs.writeFileSync(`./temp/${name}`, Buffer.from(base64, 'base64'))
     }
-    let stdin = STDIN()
-    stdin.on('line', data => {
-        let c = parseContainer(data)
-        if(c) {
-            if(opts.meta && Object.entries(opts.meta).every(([key, value]) => c.meta[key] == value)) save(c)
-            if(!opts.meta) save(c)
-        }
-    })
-})
+    exec(`mkdir ./archives/${name}; tar -xf ./temp/${name} -C ./archives/${name}`, taroutput(pubkey, name, sign))
+}
 
-args.command('sub', 'Subscribe to topic.', (_, [topic]) => {
-    client.on('connect', con => {
-        con.on('message', ({utf8Data: m}) => m.indexOf("greet") != 0 && console.log(m))
-        con.on('close', () => {
-            console.error('Closed. Try to reconnection...')
-            client.connect(broker)
-        })
-        con.on('error', () => console.error('ERROR'))
-        con.send(`sub ${topic}`)
-    })
-    client.connect(broker)
-})
+let taroutput = (pubkey, name, sign) => (_, out, err) => {
+  if(err) {
+    console.error(err)
+    return
+  }
+  fs.writeFileSync(`./archives/${name}.sign`, sign, {encoding: 'utf8'})
+  fs.writeFileSync(`./archives/${name}.pub`, pubkey, {encoding: 'utf8'})
+  fs.rmSync(`./temp/${name}`)
+}
 
-args.command('pub', 'Publish data to topic.', (_, [topic]) => {
-    client.on('connect', con => {
-        let stdin = STDIN()
-        stdin.on('line', data => con.send(`pub ${topic}|${data}`))
-        stdin.on('end', () => {
-            console.log('Files published.')
-            process.exit()
-        })
-    })
-    client.connect(broker)
+let publishArchives = (con) => {
+  fs.readdirSync('./archives/', { withFileTypes: true })
+  .filter(dirent => dirent.isDirectory())
+  .map(dirent => dirent.name)
+  .forEach(name => {
+      let pubkey = fs.readFileSync(`./archives/${name}.pub`, {encoding: 'utf8'})
+      publish(pubkey, name, con)
 })
+}
 
-args.command('greet', 'Set greeting files for topic.', (_, [topic, dir], opts) => {
-    client.on('connect', con => {
-        con.on('message', ({utf8Data: data}) => {
-            if(data.indexOf('greet') == 0) {
-                let [_, $topic] = data.split(' ')
-                if($topic == topic) {
-                    let files = fs.readdirSync(dir,{encoding: 'utf8', withFileTypes: true}).filter(dirent => dirent.isFile())
-                    for(let file of files) {
-                        let name = file.name
-                        let ext = path.extname(file.name)
-                        let meta = {
-                            name: opts.meta.name || name,
-                            ext: opts.meta.ext || ext
-                        }
-                        if(name == meta.name && ext == meta.ext) {
-                            let data = fs.readFileSync(path.join(dir, file.name), {encoding: 'base64url'})
-                            let hash = crypto.createHash('md5').update(data).digest('hex')
-                            let container = `data://name=${name};ext=${ext};hash=${hash}::${data}`
-                            console.log('File published:', name)
-                            con.send(`pub ${topic}|${container}`)
-                        }
-                    }
-                }
-            }
-        })
-    })
-    client.connect(broker)
-})
-
-args.command('echo', 'Print files.', (_, __, opts) => {
-    let save = (c) => {
-        console.log(Buffer.from(c.data, 'base64url').toString('utf8'))
+let publish = (pubkey, name, con) => {
+  exec(`tar -C ./archives/${name} -c . > ./temp/${name}`, (_, __, err) => {
+    if(err) {
+      console.error(err)
+      return
     }
-    let stdin = STDIN()
-    stdin.on('line', data => {
-        let c = parseContainer(data)
-        if(c) {
-            if(opts.meta && Object.entries(opts.meta).every(([key, value]) => c.meta[key] == value)) save(c)
-            if(!opts.meta) save(c)
-        }
-    })
-})
+    let base64 = fs.readFileSync(`./temp/${name}`, {encoding: 'base64'})
+    let sign = fs.readFileSync(`./archives/${name}.sign`, {encoding: 'utf8'})
+    con.send(`${name}\n@@@\n${pubkey}\n@@@\n${sign}\n@@@\n${base64}`)
+  })
+}
+
+let addArchive = (dir, id) => {
+  let pubkey = fs.readFileSync(`./ids/${id}.pub`, {encoding: 'utf8'})
+  let prvkey = fs.readFileSync(`./ids/${id}.rsa`, {encoding: 'utf8'})
+  let passphrase = fs.readFileSync(`./ids/${id}.pass`, {encoding: 'utf8'})
+  let name = dir.split('/').filter(el => el.trim().length > 0).pop()
+  exec(`tar -C ${dir} -c . > ./temp/${name}`, (_, __, err) => {
+    if(err) {
+      console.error(err)
+    }
+    let data = fs.readFileSync(`./temp/${name}`)
+    let sign = crypto.sign('RSA-SHA256', data, {key: prvkey, passphrase}).toString('hex')
+    decompress(pubkey, name, sign, null, true)
+  })
+}
 
 args.parse(process.argv)

@@ -19,7 +19,7 @@ args.command('run','Run daemon.', (_, __, opts) => {
               .map(dirent => dirent.name)
               .map(dirent => fs.readFileSync(`./archives/${dirent}.sign`, {encoding: 'hex'}))
               .join(' ')
-    
+
     client.send(`stockings:repo ${repo}`)
 
     client.on('error', () => console.error('Connection closed (ERROR).'))
@@ -34,8 +34,8 @@ args.command('run','Run daemon.', (_, __, opts) => {
           return false
         }
       if(crypto.verify('RSA-SHA256', Buffer.from(base64, 'base64'), pubkey, Buffer.from(sign, 'base64'))) {
-        if(fs.existsSync(`./archives/${name}.ver`) && 
-           semver.gt(fs.readFileSync(`./archives/${name}.ver`, {encoding: 'utf8'}), ver)
+        if(fs.existsSync(`./archives/${name}.ver`) &&
+          fs.readFileSync(`./archives/${name}.ver`, {encoding: 'utf8'}) > ver
           ) {
             console.error("ERROR: Archive is outdated. Reject.")
             return false
@@ -56,7 +56,16 @@ args.command('add', 'Add directory to repo', (_, [dir, ver], opts) => addArchive
 
 args.command('remove', 'Remove archive from repo', (_, [name]) => removeArchive(name))
 
-args.command('get-version', 'Get version of archive', (_, [name]) => 
+args.command('list', 'List all archives', () => 
+  console.log(
+    fs.readdirSync('./archives/', { withFileTypes: true })
+    .filter(dirent => dirent.isDirectory())
+    .map(dirent => dirent.name)
+    .join('\n')
+  )
+)
+
+args.command('get-version', 'Get version of archive', (_, [name]) =>
   console.log(fs.readFileSync(`./archives/${name}.ver`, {encoding: 'utf8'}))
 )
 
@@ -124,7 +133,7 @@ let publishArchives = (con) => {
 }
 
 let publish = (pubkey, name, ver, con) => {
-  exec(`tar -C ./archives/${name} -c . > ./temp/${name}`, (_, __, err) => {
+  exec(`tar -C ./archives/${name} --sort=name --owner=root:0 --group=root:0 --mtime='UTC 2007-09-11' -c . > ./temp/${name}`, (_, __, err) => {
     if(err) {
       console.error(err)
       return
@@ -140,7 +149,7 @@ let addArchive = (dir, id, ver) => {
   let prvkey = fs.readFileSync(`./ids/${id}.rsa`, {encoding: 'utf8'})
   let passphrase = fs.readFileSync(`./ids/${id}.pass`, {encoding: 'utf8'})
   let name = dir.split('/').filter(el => el.trim().length > 0).pop()
-  exec(`tar -C ${dir} -c . > ./temp/${name}`, (_, __, err) => {
+  exec(`tar -C ${dir} --sort=name --owner=root:0 --group=root:0 --mtime='UTC 2002-09-11' -c . > ./temp/${name}`, (_, __, err) => {
     if(err) {
       console.error(err)
     }
@@ -151,7 +160,7 @@ let addArchive = (dir, id, ver) => {
 }
 
 let removeArchive = name => {
-  fs.rmdirSync(`./archives/${name}`)
+  fs.rmSync(`./archives/${name}`, {recursive: true, force: true})
   fs.rmSync(`./archives/${name}.pub`)
   fs.rmSync(`./archives/${name}.sign`)
   fs.rmSync(`./archives/${name}.ver`)
